@@ -3,6 +3,11 @@ Baileys
 # compiled output
 /dist
 /node_modules
+/coverage
+/tmp
+/temp
+/cache
+/logs
 
 /Docker/.env
 
@@ -39,6 +44,41 @@ lerna-debug.log*
 /store
 *.env
 
+# Local editor/workbench files
+.cursor/
+
+# Local databases and caches
+*.sqlite
+*.sqlite3
+*.db
+*.rdb
+
+# Archives and binaries (avoid large files in git)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.bin
+*.exe
+*.iso
+
+# Media exports and generated assets
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.flac
+*.pdf
+
+# System files
+.DS_Store
+Thumbs.db
+
 /temp/*
 
 .DS_Store
@@ -46,3 +86,6 @@ lerna-debug.log*
 .tool-versions
 
 /prisma/migrations/*
+
+# Prevent accidental commit of generated manager build
+/manager/dist/
