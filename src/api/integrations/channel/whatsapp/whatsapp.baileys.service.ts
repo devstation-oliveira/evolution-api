@@ -522,12 +522,16 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private async getMessage(key: proto.IMessageKey, full = false) {
     try {
-      // Use raw SQL to avoid JSON path issues
-      const webMessageInfo = (await this.prismaRepository.$queryRaw`
-        SELECT * FROM "Message"
-        WHERE "instanceId" = ${this.instanceId}
-        AND "key"->>'id' = ${key.id}
-      `) as proto.IWebMessageInfo[];
+      const webMessageInfo = await this.prismaRepository.message.findMany({
+        where: {
+          instanceId: this.instanceId,
+          key: {
+            path: ['id'],
+            equals: key.id,
+          },
+        },
+        take: 1,
+      });
 
       if (full) {
         return webMessageInfo[0];
@@ -1638,13 +1642,15 @@ export class BaileysStartupService extends ChannelStartupService {
 
             const searchId = originalMessageId || key.id;
 
-            const messages = (await this.prismaRepository.$queryRaw`
-              SELECT * FROM "Message"
-              WHERE "instanceId" = ${this.instanceId}
-              AND "key"->>'id' = ${searchId}
-              LIMIT 1
-            `) as any[];
-            findMessage = messages[0] || null;
+            findMessage = await this.prismaRepository.message.findFirst({
+              where: {
+                instanceId: this.instanceId,
+                key: {
+                  path: ['id'],
+                  equals: searchId,
+                },
+              },
+            });
 
             if (!findMessage?.id) {
               this.logger.warn(`Original message not found for update. Skipping. Key: ${JSON.stringify(key)}`);
@@ -3435,26 +3441,50 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   public async listMessage(data: SendListDto) {
-    return await this.sendMessageWithTyping(
-      data.number,
-      {
-        listMessage: {
-          title: data.title,
-          description: data.description,
-          buttonText: data?.buttonText,
-          footerText: data?.footerText,
-          sections: data.sections,
-          listType: 2,
+    const message: proto.IMessage = {
+      viewOnceMessage: {
+        message: {
+          interactiveMessage: {
+            body: {
+              text: (() => {
+                let text = '';
+
+                if (data.title) {
+                  text += `*${data.title}*`;
+                }
+
+                if (data.description) {
+                  text += text ? `\n\n${data.description}` : data.description;
+                }
+
+                return text;
+              })(),
+            },
+            footer: { text: data?.footerText },
+            nativeFlowMessage: {
+              buttons: [
+                {
+                  name: 'single_select',
+                  buttonParamsJson: JSON.stringify({
+                    title: data?.buttonText || 'Selecionar',
+                    sections: data.sections,
+                  }),
+                },
+              ],
+              messageParamsJson: JSON.stringify({ from: 'api', templateId: v4() }),
+            },
+          },
         },
       },
-      {
-        delay: data?.delay,
-        presence: 'composing',
-        quoted: data?.quoted,
-        mentionsEveryOne: data?.mentionsEveryOne,
-        mentioned: data?.mentioned,
-      },
-    );
+    };
+
+    return await this.sendMessageWithTyping(data.number, message, {
+      delay: data?.delay,
+      presence: 'composing',
+      quoted: data?.quoted,
+      mentionsEveryOne: data?.mentionsEveryOne,
+      mentioned: data?.mentioned,
+    });
   }
 
   public async contactMessage(data: SendContactDto) {
@@ -4740,23 +4770,39 @@ export class BaileysStartupService extends ChannelStartupService {
   private async updateMessagesReadedByTimestamp(remoteJid: string, timestamp?: number): Promise<number> {
     if (timestamp === undefined || timestamp === null) return 0;
 
-    // Use raw SQL to avoid JSON path issues
-    const result = await this.prismaRepository.$executeRaw`
-      UPDATE "Message"
-      SET "status" = ${status[4]}
-      WHERE "instanceId" = ${this.instanceId}
-      AND "key"->>'remoteJid' = ${remoteJid}
-      AND ("key"->>'fromMe')::boolean = false
-      AND "messageTimestamp" <= ${timestamp}
-      AND ("status" IS NULL OR "status" = ${status[3]})
-    `;
+    const messages = await this.prismaRepository.message.findMany({
+      where: {
+        instanceId: this.instanceId,
+        messageTimestamp: { lte: timestamp },
+        OR: [{ status: null }, { status: status[3] }],
+        AND: [
+          { key: { path: ['remoteJid'], equals: remoteJid } },
+          { key: { path: ['fromMe'], equals: false } },
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (messages.length === 0) {
+      return 0;
+    }
+
+    const result = await this.prismaRepository.message.updateMany({
+      where: {
+        id: { in: messages.map((message) => message.id) },
+      },
+      data: {
+        status: status[4],
+      },
+    });
 
     if (result) {
-      if (result > 0) {
+      const count = typeof result === 'number' ? result : result.count;
+      if (count > 0) {
         this.updateChatUnreadMessages(remoteJid);
       }
 
-      return result;
+      return count;
     }
 
     return 0;
@@ -4765,14 +4811,16 @@ export class BaileysStartupService extends ChannelStartupService {
   private async updateChatUnreadMessages(remoteJid: string): Promise<number> {
     const [chat, unreadMessages] = await Promise.all([
       this.prismaRepository.chat.findFirst({ where: { remoteJid } }),
-      // Use raw SQL to avoid JSON path issues
-      this.prismaRepository.$queryRaw`
-        SELECT COUNT(*)::int as count FROM "Message"
-        WHERE "instanceId" = ${this.instanceId}
-        AND "key"->>'remoteJid' = ${remoteJid}
-        AND ("key"->>'fromMe')::boolean = false
-        AND "status" = ${status[3]}
-      `.then((result: any[]) => result[0]?.count || 0),
+      this.prismaRepository.message.count({
+        where: {
+          instanceId: this.instanceId,
+          status: status[3],
+          AND: [
+            { key: { path: ['remoteJid'], equals: remoteJid } },
+            { key: { path: ['fromMe'], equals: false } },
+          ],
+        },
+      }),
     ]);
 
     if (chat && chat.unreadMessages !== unreadMessages) {
